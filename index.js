@@ -4,6 +4,11 @@ const cors = require("cors");
 var jwt = require("jsonwebtoken");
 require("dotenv").config();
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+// ssl commerce
+const SSLCommerzPayment = require("sslcommerz-lts");
+const store_id = process.env.STORE_ID;
+const store_passwd = process.env.STORE_PASS;
+const is_live = false;
 
 const port = process.env.PORT || 5000;
 
@@ -39,6 +44,9 @@ async function run() {
     const paymentCollection = client
       .db("bistro-boss-recap")
       .collection("payments");
+    const SSLpaymentCollection = client
+      .db("bistro-boss-recap")
+      .collection("SSLpayments");
 
     // JWT
     app.post("/jwt", async (req, res) => {
@@ -144,16 +152,20 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/menuPagination/:category", async(req, res)=>{
-      let {page, size} = req.query
-      const {category} = req.params
-      const query = {category : category}
+    app.get("/menuPagination/:category", async (req, res) => {
+      let { page, size } = req.query;
+      const { category } = req.params;
+      const query = { category: category };
       page = parseInt(page);
-      size = parseInt(size)
-      const totalItem = await menuCollection.countDocuments(query)
-      const result = await menuCollection.find(query).skip(page * size).limit(size).toArray();
-      res.send({category: result, totalItem})
-    })
+      size = parseInt(size);
+      const totalItem = await menuCollection.countDocuments(query);
+      const result = await menuCollection
+        .find(query)
+        .skip(page * size)
+        .limit(size)
+        .toArray();
+      res.send({ category: result, totalItem });
+    });
 
     app.get("/menu/:id", async (req, res) => {
       const id = req.params.id;
@@ -214,6 +226,93 @@ async function run() {
       res.send(result);
     });
 
+    //sslcommerz init payment system
+    app.post("/sslPayment", async (req, res) => {
+      const payment = req.body;
+      const tran_id = new ObjectId().toString();
+      const data = {
+        total_amount: payment?.price,
+        currency: "BDT",
+        tran_id: tran_id, // use unique tran_id for each api call
+        success_url: `https://bistro-boss-recap-server-lake.vercel.app/payment/success/${tran_id}`,
+        fail_url: `https://bistro-boss-recap-server-lake.vercel.app/payment/fail/${tran_id}`,
+        cancel_url: "http://localhost:3030/cancel",
+        ipn_url: "http://localhost:3030/ipn",
+        shipping_method: "Courier",
+        product_name: "Computer.",
+        product_category: "Electronic",
+        product_profile: "general",
+        cus_name: payment?.email,
+        cus_email: payment?.email,
+        cus_add1: "Dhaka",
+        cus_add2: "Dhaka",
+        cus_city: "Dhaka",
+        cus_state: "Dhaka",
+        cus_postcode: "1000",
+        cus_country: "Bangladesh",
+        cus_phone: "01711111111",
+        cus_fax: "01711111111",
+        ship_name: "Customer Name",
+        ship_add1: "Dhaka",
+        ship_add2: "Dhaka",
+        ship_city: "Dhaka",
+        ship_state: "Dhaka",
+        ship_postcode: 1000,
+        ship_country: "Bangladesh",
+      };
+
+      const sslcz = new SSLCommerzPayment(store_id, store_passwd, is_live);
+      sslcz.init(data).then((apiResponse) => {
+        // Redirect the user to payment gateway
+        let GatewayPageURL = apiResponse.GatewayPageURL;
+        // res.redirect(GatewayPageURL)
+        res.send({ url: GatewayPageURL });
+      });
+
+      const payData = {
+        ...payment,
+        paymentStatus: false,
+        transactionId: tran_id,
+      };
+
+      const result = await SSLpaymentCollection.insertOne(payData);
+
+      // console.log(result);
+
+      app.post("/payment/success/:tranId", async (req, res) => {
+        console.log("hitting", req.params.tranId);
+        const result = await SSLpaymentCollection.updateOne(
+          { transactionId: req.params.tranId },
+          {
+            $set: {
+              paymentStatus: true,
+            },
+          }
+        );
+
+        const query = {
+          _id: {
+            $in: payment.cartIds.map((id) => new ObjectId(id)),
+          },
+        };
+
+        const deleteResult = await cartCollection.deleteMany(query);
+
+        if (result.modifiedCount > 0) {
+          res.redirect(`https://bistro-boss-recap-62901.web.app/payment/success/${tran_id}`);
+        }
+      });
+      app.post("/payment/fail/:tranId", async (req, res) => {
+        const result = await SSLpaymentCollection.deleteOne({
+          transactionId: req.params.tranId,
+        });
+
+        if (result.deletedCount) {
+          res.redirect(`https://bistro-boss-recap-62901.web.app/payment/fail/${tran_id}`);
+        }
+      });
+    });
+
     // payment intent
     app.post("/create-payment-intent", async (req, res) => {
       const { price } = req.body;
@@ -230,6 +329,7 @@ async function run() {
       });
     });
 
+    // stripe payment
     app.get("/payments/:email", verifyToken, async (req, res) => {
       const email = req.params.email;
       const query = { email: email };
